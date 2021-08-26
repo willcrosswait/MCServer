@@ -1,0 +1,221 @@
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.InetSocketAddress;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
+import java.lang.String;
+import java.lang.StringBuilder;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.io.InputStreamReader;
+import java.io.BufferedReader;
+import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
+import java.util.regex;
+import java.lang.Integer;
+
+public class MCAServer {
+
+  private MCA nextAvailableMCA;  // Ready to go next available MCA
+  private ArrayList<MCA> usedMCAs; // Stores MCAs that are currently in use
+  private ArrayList<MCA> recycledMCAs; // Stores MCAs that have been returned
+  
+  // According to Stack Overflow, this should set up a quick server without having to parse a million things
+  public static void main( String[] args ) throws Exception {
+    int port = 8000;
+    InetSocketAddress iaddress = new InetSocketAddress(port);
+    
+    // Lower limit, starting MCA
+    nextAvailableMCA = new MCA(224, 0, 0, 1);
+
+    // Set up server
+    HttpServer server = HttpServer.create(iaddress, 0);
+    server.createContext("/request", new RequestHandler());
+    server.createContext("/recycle", new RecycleHandler());
+    server.setExecutor(null);
+    server.start();
+  }
+  
+  // Finds first available MCA in recycled MCA list, or creates a new one based on the next available MCA
+  public MCA getNextMCA() throws Exception {
+  
+    //Use previous MCAs first
+    for (MCA a : recycledMCAs) {
+      if (a.isAvailable()) {
+        a.setAvailable(false);
+        usedMCAs.add(a);
+        recycledMCAs.remove(a);
+        return a;
+      }
+    }
+    
+    // Upper limit
+    if (nextAvailableMCA.getAddress().equals("239.255.255.255")) {
+      throw new Exception("No more addresses available; please try again once other addresses have been returned");
+    }
+    
+    return incrementMCA();
+    
+  }
+  
+  // Increments MCA by section
+  public MCA incrementMCA() {
+    
+    MCA outputMCA = nextAvailableMCA;
+    
+    if ( nextAvailableMCA.getQuadFour() < 255 ) {
+      outputMCA.setQuadFour(nextAvailableMCA.getQuadFour()+1);
+    }
+    else if ( nextAvailableMCA.getQuadThree() < 255 ) {
+      outputMCA.setQuadFour(0);
+      outputMCA.setQuadThree(nextAvailableMCA.getQuadThree()+1);
+    }
+    else if ( nextAvailableMCA.getQuadTwo() < 255 ) {
+      outputMCA.setQuadFour(0);
+      outputMCA.setQuadThree(0);
+      outputMCA.setQuadTwo(nextAvailableMCA.getQuadTwo()+1);
+    }
+    else {
+      outputMCA.setQuadFour(0);
+      outputMCA.setQuadThree(0);
+      outputMCA.setQuadTwo(0);
+      outputMCA.setQuadOne(nextAvailableMCA.getQuadOne()+1);
+    }
+    return outputMCA;
+  
+  }
+  
+  // Check list to see if this has been recycled before 
+  public void updateRecycledList( String query ) {
+  
+    int q1 = Integer.parseInt(query.substring(0,3));
+    int q2 = Integer.parseInt(query.substring(4,7));
+    int q3 = Integer.parseInt(query.substring(8,11));
+    int q4 = Integer.parseInt(query.substring(12));
+      
+    MCA recycledMCA = new MCA(q1, q2, q3, q4);
+    
+    // If this has been used, add it to the recycled list and
+    // remove it from the used list
+    for (MCA m : usedMCAs) {
+      if (m.getAddress().equals(recycledMCA.getAddress())) {
+        m.setAvailable(true);
+        recycledMCAs.add(m);
+        usedMCAs.remove(m);
+        return;
+      }
+    }
+    
+    usedMCAs.add(recycledMCA);
+  }
+  
+  static class RequestHandler implements HttpHandler {
+    @Override
+    public void handle(HttpExchange t) throws Exception {
+      // Return next available MCA
+      String mca = nextAvailableMCA.getAddress();
+      
+      // Update next MCA, either by incrementing or by grabbing a recycled MCA
+      nextAvailableMCA = getNextMCA();
+      
+      // Send response
+      t.sendResponseHeaders(200, mca.length());
+      OutputStream os = t.getResponseBody();
+      os.write(mca.getBytes());
+      os.close();
+    }
+  }
+  
+  static class RecycleHandler implements HttpHandler {
+    @Override
+    public void handle(HttpExchange t) throws Exception {
+      // Recycle the address - read the address given and add to arraylist
+      // Assume the message is just the string address itself for simplicity's sake
+      
+      Map<String, Object> params = new HashMap<String, Object>();
+      InputStreamReader input = new InputStreamReader(t.getRequestBody(), "utf-8");
+      BufferedReader buff = new BufferedReader(input);
+      String query = buff.readLine();
+      
+      //Use regex to verify line is as expected
+      if ( ! query.matches("\\d\\d\\d\\.\\d\\d\\d\\.\\d\\d\\d\\.\\d\\d\\d", query) ) {
+        throw new Exception("Request formatted incorrectly");
+      }
+      
+      // Add recycled MCA to list of recycled MCA
+      updateRecycledList(query);
+      
+      // Response that recycle has been successful
+      String response = "MCA recycled; thank you for returning your address";
+      t.sendResponseHeaders(200, response.length());
+      OutputStream os = t.getResponseBody();
+      os.write(response.getBytes());
+      os.close();
+    }
+  
+  
+  // container for addresses
+  private class MCA {
+    
+    /*
+        225.000.004.001
+        quadOne = 225
+        quadTwo = 000
+        quadThree = 004
+        quadFour = 001
+    */
+    
+    private int quadOne;
+    private int quadTwo;
+    private int quadThree;
+    private int quadFour;
+    private boolean isAvailable; 
+    
+    public MCA(int one, int two, int three, int four) {
+      quadOne = one;
+      quadTwo = two;
+      quadThree = three;
+      quadFour = four;
+      isAvailable = true;
+    }
+    
+    public String getAddress() {
+      StringBuilder output = new StringBuilder();
+      output.append(quadOne);
+      output.append(".");
+      output.append(quadTwo);
+      output.append(".");
+      output.append(quadThree);
+      output.append(".");
+      output.append(quadFour);
+      return output.toString();
+    }
+    
+    public int getQuadOne() {
+      return quadOne;
+    }
+    
+    public int getQuadTwo() {
+      return quadOne;
+    }
+    
+    public int getQuadThree() {
+      return quadOne;
+    }
+    
+    public int getQuadFour() {
+      return quadOne;
+    }
+    
+    public boolean isAvailable() {
+      return isAvailable;
+    }
+    
+    public void setAvailable(boolean available) {
+      isAvailable = available;
+    }
+    
+  }
+
+}
